@@ -1,0 +1,524 @@
+<style>
+  body {
+    background-color: #202020;
+    margin: auto;
+  }
+  textarea {
+    position: absolute;
+    width: 49%;
+    max-width: 100%;
+    border: 1px solid #6c6c6c;
+    border-radius: 4px;
+    padding: 10px;
+    font-family: consolas;
+    font-size: 1em;
+    white-space: pre-wrap;
+    color: #fff;
+    resize: none;
+    opacity: 0.5;
+  }
+  textarea:hover {
+    transition: all 0.3s ease;
+    opacity: 1;
+  }
+  #code {
+    white-space: pre;
+    opacity: 1;
+    position: absolute;
+    width: 100vw;
+    height: 100vh;
+    background-color: #3f3f3f;
+    color: #dcdccc;
+  }
+  #console {
+    Line-break: anywhere;
+    background-color: #282828;
+    z-index: 10000;
+  }
+  #output {
+    background-color: #000;
+    z-index: 10000;
+  }
+  .logArea {
+    display: flex;
+    align-items: center;
+    height: 4em;
+    transition: height 0.5s 0s ease-in-out;
+  }
+  .logArea:hover {
+    height: 40vh;
+    transition: height 0.5s 0s ease-in-out;
+  }
+  /* スクロールバー全体 */
+  ::-webkit-scrollbar {
+    width: 16px;
+    background-color: #171717;
+  }
+  /* スクロールバーのつまみ */
+  ::-webkit-scrollbar-thumb {
+    background-color: #959595;
+    border-radius: 8px;
+    border: 7px solid #171717;
+  }
+  /* スクロールバーのつまみ(ホバー時)*/
+  ::-webkit-scrollbar-thumb:hover {
+    border: 5px solid #171717;
+  }
+  /* スクロールバーの角 */
+  ::-webkit-scrollbar-corner {
+    background-color: #363636;
+  }
+</style>
+
+<body onload="editorRun()"></body>
+
+<script>
+'use strict';
+class Project {
+  indent = '    ';
+  oldHistory = { start: [], end: [], codeLines: [] };
+  newHistory = { start: [], end: [], codeLines: [] };
+  
+  parseCodeState() {
+    this.codeLines = this.codeLines.split( '\n' );
+    
+    this.startIndex = this.getLineIndexBy( this.start );
+    this.startOffset = this.start - this.getCursorOffsetBy( this.startIndex );
+    
+    if ( this.start === this.end ) {
+      this.selectionAxis = this.start;
+      
+      this.endIndex = this.startIndex;
+      this.endOffset = this.startOffset;
+    } else {
+      this.endIndex = this.getLineIndexBy( this.end );
+      this.endOffset = this.end - this.getCursorOffsetBy( this.endIndex );
+    }
+    
+    if ( this.startIndex !== this.endIndex && this.endOffset === 0 ) {
+      if ( this.key !== 'd' ) this.endIndex--;
+    }
+  }
+  
+  getLineIndexBy( position ) {
+    let offset = 0, index = 0;
+    while ( offset <= position && index < this.codeLines.length ) {
+      offset += this.codeLines[index++].length + 1;
+    }
+    return index - 1;
+  }
+  
+  getCursorOffsetBy( index ) {
+    return this.codeLines.slice( 0, index )
+      .reduce( ( offset, line ) => offset + line.length + 1, 0 );
+  }
+}
+
+function editorRun() {
+  const editor = new Proxy( new Project(), {
+    set( target, prop, value ) {
+      if ( target[prop] !== value ) {
+        target[prop] = value;
+      }
+      return true;
+    }
+  });
+
+  const code = document.createElement( 'textarea' );
+  code.id = 'code';
+  code.placeholder = "Pleace enter the code here...";
+
+  code.addEventListener( 'input', executeJS );
+  code.addEventListener( 'keydown', async function( event ) {
+    const { key, ctrlKey, shiftKey } = event;
+    if ( KeyUtils.isIgnoreKeys( key ) ) return;
+    
+    const { value: codeLines, selectionStart: start, selectionEnd: end } = this;
+    
+    Object.assign( editor, { codeLines, start, end, key, ctrlKey, shiftKey } );
+    editor.parseCodeState();
+    
+    if ( KeyUtils.proposeSaveHistory( editor ) ) pushHistory( editor );
+    if ( KeyUtils.isntHandleKeys( editor ) ) return;
+    
+    event.preventDefault();
+    const handler = handlers.get( key );
+    if ( !handler ) return;
+    
+    await executeHandler( handler, editor );
+    if ( KeyUtils.isLeftRightKeys( key ) ) return;
+    executeJS();
+  });
+  document.body.appendChild( code );
+}
+
+// 操作のロジックに関するユーティリティクラス
+class CursorUtils {
+  static isSelected( editor ) {
+    return editor.start !== editor.end;
+  }
+  static isFarLeft( editor ) {
+    return editor.startOffset === 0;
+  }
+  static isFarRight( editor ) {
+    return editor.codeLines[editor.endIndex][editor.endOffset] === undefined;
+  }
+}
+
+const KeyUtils = {
+  isLeftRightKeys:
+    ( key ) => [ 'ArrowLeft', 'ArrowRight' ].includes( key ), 
+  isIgnoreKeys:
+    ( key ) => [ 'Control', 'Shift', 'Home', 'End' ].includes( key ), 
+  isNavigateKey:
+    ( key ) => key.startsWith( 'Arrow' ), 
+  isHistoryKey:
+    ( key, ctrlKey ) => ctrlKey && [ 'z', 'y' ].includes( key ), 
+  isWordKey:
+    ( key, ctrlKey ) => ctrlKey &&
+      [ 'ArrowLeft', 'ArrowRight', 'Backspace', 'Delete' ].includes( key ), 
+  isEditKey:
+    ( key ) => [ 'ArrowLeft', 'ArrowRight', 'Enter', 'Tab' ].includes( key ), 
+  isCtrlKey:
+    ( key, ctrlKey, shiftKey ) =>
+      [ 'z', 'y', 'd', 'o' ].includes( key ) && ctrlKey && !shiftKey, 
+  isCtrlShiftKey:
+    ( key, ctrlKey, shiftKey ) =>
+      [ 'ArrowUp', 'ArrowDown' ].includes( key ) && ctrlKey && shiftKey, 
+  
+  proposeSaveHistory( { key, ctrlKey } ) {
+    return !( this.isNavigateKey( key ) || this.isHistoryKey( key, ctrlKey ) );
+  },
+  
+  isntHandleKeys( editor ) {
+    const { key, ctrlKey, shiftKey } = editor;
+    const { isSelected, isFarLeft, isFarRight } = CursorUtils;
+    if ( this.isWordKey( key, ctrlKey ) ) return true;
+    if ( key === 'Backspace' )
+      return isSelected( editor ) || isFarLeft( editor );
+    if ( key === 'Delete' )
+      return isSelected( editor ) || isFarRight( editor );
+    return !( this.isEditKey( key ) ||
+      this.isCtrlKey( key, ctrlKey, shiftKey ) ||
+      this.isCtrlShiftKey( key, ctrlKey, shiftKey ) );
+  },
+};
+
+const handlers = new Map( [
+  [ 'ArrowUp',    handleArrowUp ], 
+  [ 'ArrowDown',  handleArrowDown ], 
+  [ 'ArrowLeft',  handleArrowLeftAndRight ], 
+  [ 'ArrowRight', handleArrowLeftAndRight ], 
+  [ 'Backspace',  handleBackspace ], 
+  [ 'd',          handleDuplicateLine ], 
+  [ 'Delete',     handleDelete ], 
+  [ 'Enter',      handleEnter ], 
+  [ 'Tab',        handleTab ], 
+  [ 'y',          applyHistory ], 
+  [ 'z',          applyHistory ],
+]);
+
+function updateCode( editor ) {
+  const code = document.querySelector( '#code' );
+  code.value = editor.codeLines.join( '\n' );
+  code.selectionStart = editor.start;
+  code.selectionEnd = editor.end;
+}
+
+function executeHandler( handler, editor ) {
+  return new Promise( ( resolve ) => resolve( handler( editor ) ) )
+  .then( ( handlerResult ) => Object.assign( editor, handlerResult ?? {} ) )
+  .then( () => updateCode( editor ) )
+  .catch( ( error ) => createLog( 'console', formatError( error ) ) );
+}
+
+function formatError( error ) {
+  const [ first, ...rest ] = error.stack.split( '\n' );
+  const messages = rest.map( line => /\w*\.html[:\d]+/.exec( line ) );
+  messages.unshift( first );
+  return messages.join( '\n' );
+}
+
+// コードの実行結果を反映する関数
+function executeJS() {
+  const code = document.querySelector( '#code' );
+  new Promise(( resolve ) => { resolve( eval?.( code.value )) })
+  .catch(( error ) => errorMessages( error ))
+  .then(( result ) => updateLog( 'output', result ));
+}
+
+const log = function( ...args ) {
+  updateLog( 'console', args.reduce(( str, arg ) =>
+      str += `${ JSON.stringify( arg ) }\n` , '' ));
+}
+
+function updateLog( id, result ) {
+  const elem = document.getElementById( id );
+  if ( elem ) {
+    elem.remove();
+    if (id === 'console') result = `${ result } ${ elem.value }`;
+  } 
+  if ( result !== undefined && result !== "" ) createLog( id, result );
+}
+
+function createLog( id, result ) {
+  const elem = document.createElement( 'textarea' );
+  elem.id = id;
+  elem.value = result;
+  elem.className = 'logArea';
+  elem.style.transform = logTranslate( ( id === 'output' ) ? 0 : 64);
+  elem.setTimer = function ( time ) {
+    return setTimeout( () => { this.remove(); }, time );
+  };
+  elem.timeoutID = elem.setTimer( 2500 );
+  elem.addEventListener( 'mouseenter', function() {
+    clearTimeout( this.timeoutID );
+  });
+  elem.addEventListener( 'mouseleave', function() {
+    this.timeoutID = this.setTimer( 2500 );
+  });
+  
+  document.body.insertBefore( elem, document.body.firstChild );
+}
+
+function logTranslate( h0 ) {
+  const code = document.getElementById( "code" );
+  const { value, selectionStart, clientHeight, scrollTop } = code;
+  const textBeforeCaret = value.slice( 0, selectionStart );
+  
+  const tempDiv = document.createElement( "div" );
+  tempDiv.style.position = "absolute";
+  tempDiv.style.whiteSpace = "pre-wrap";
+  tempDiv.style.padding = "10px";
+  tempDiv.style.font = window.getComputedStyle( code ).font;
+  tempDiv.textContent = textBeforeCaret.replace( /\n/g, "\u200b\n" );
+  
+  document.body.appendChild( tempDiv );
+  const { offsetHeight } = tempDiv;
+  document.body.removeChild( tempDiv );
+  
+  const caretRatio = (offsetHeight - scrollTop) / clientHeight;
+  const logHeight = h0 + clientHeight *
+    ( ( 1/4 < caretRatio && caretRatio < 1/2 ) ? 1/6 : 2/5 );
+  
+  return `translate(100%, ${ logHeight }px)`;
+}
+
+function errorMessages( error ) {
+  switch( true ) {
+    case error instanceof ReferenceError:
+      const input = /^.*\b/.exec( error.stack )[0].split( ' ' );
+      return input[1] === 'Cannot' ?
+        `初期化前に${ input[3] } にアクセスしちゃってるみたいだね…` :
+        `あれ…？${ input[1] } って変数、どこにも見つからないよ…`;
+    case error instanceof SyntaxError:
+      return `これ、書き方が変だよ…文法が違うみたい…`;
+    case error instanceof TypeError:
+      return `うーん、それ違うよ…その型じゃ動けないみたいだよ…`;
+    case error instanceof RangeError:
+      return `その範囲、広すぎる…無理だよ…もっと小さくしてみて…`;
+    case error instanceof URIError:
+      return `このURI、変だよ…エンコードとか、ちゃんと考えてみて…`;
+    default:
+      return formatError( error );
+  }
+}
+
+// 各キーの処理関数
+
+// 履歴の管理を行う関数
+function applyHistory( editor ) {
+  const { oldHistory, newHistory, key } = editor;
+  const { [key]: { codeLines, start, end } } = { z: oldHistory, y: newHistory };
+  
+  // 履歴が空なら何もしない
+  if ( codeLines.length === 0 ) return;
+  
+  // 履歴を保存してから中身を取り出す
+  pushHistory( editor );
+  return { codeLines: codeLines.pop(), start: start.pop(), end: end.pop() };
+}
+
+// 履歴の追加を行う関数
+function pushHistory( { oldHistory: target, newHistory, codeLines, start, end, key, ctrlKey } ) {
+  // 新しい履歴をクリア
+  const clearHistory = ( history ) => Object.values( history ).forEach( arr => arr.length = 0 );
+  // 古い履歴を削除（FIFO方式）
+  const trimOldHistory = ( history ) => Object.values( history ).forEach( arr => arr.shift() );
+
+  // Ctrl + Z，Ctrl + Y 以外の場合は新しい履歴をクリア
+  if ( KeyUtils.isHistoryKey( key, ctrlKey ) === false ) {
+    clearHistory( newHistory );
+  } else if ( key === 'z' ) {
+    target = newHistory;
+  }
+
+  // 履歴を保存する
+  target.codeLines.push( codeLines );
+  target.start.push( start );
+  target.end.push( end );
+  
+  // 古い履歴の制限（最大500件を超えた場合）
+  if ( target.codeLines.length > 500 ) trimOldHistory( target );
+};
+
+function handleArrowLeftAndRight( editor ) {
+  let { codeLines, selectionAxis, end, key, shiftKey, indent } = editor;
+  let position, index, offset;
+  
+  if ( selectionAxis < end ) {
+    ( { end: position, endIndex: index, endOffset: offset } = editor );
+  } else {
+    ( { start: position, startIndex: index, startOffset: offset } = editor );
+  }
+  const leadingspaceLength = key === 'ArrowLeft' ?
+    codeLines[index].slice( 0, offset ).match( /\s*$/ )[0].length :
+    codeLines[index].slice( offset ).match( /^\s*/ )[0].length;
+  const spaceLength = leadingspaceLength < indent.length ? 1 : leadingspaceLength;
+  
+  let newPosition = Math.max ( position + ( key === 'ArrowLeft' ? -1 : 1 ) * spaceLength, 0 );
+  if ( newPosition < selectionAxis && shiftKey ) {
+    [ selectionAxis, newPosition ] = [ newPosition, selectionAxis ];
+  }
+  return { start: shiftKey ? selectionAxis : newPosition, end: newPosition };
+}
+
+function handleBackspace( { codeLines, end, endIndex, endOffset, indent } ) {
+  const line = codeLines[endIndex];
+  const leadingspaceLength = line.slice( 0, endOffset ).match( /\s*$/ )[0].length;
+  const spaceLength = leadingspaceLength < indent.length ? 1 : indent.length;
+  codeLines[endIndex] = spliceText( line, endOffset - spaceLength, spaceLength );
+  const newPosition = end - spaceLength;
+  return { start: newPosition, end: newPosition };
+}
+
+function handleDelete( { codeLines, endIndex, endOffset, indent } ) {
+  const line = codeLines[endIndex];
+  const leadingspaceLength = line.slice( endOffset ).match( /^\s*/ )[0].length;
+  const spaceLength = leadingspaceLength < indent.length ? 1 : indent.length;
+  codeLines[endIndex] = spliceText( line, endOffset, spaceLength );
+}
+
+function handleTab( editor ) {
+  if ( editor.startIndex !== editor.endIndex ) {
+    return adjustMultipleLinesIndent( editor );
+  }
+  const newPosition = editor.start + adjustSingleLinesIndent( editor );
+  return { start: newPosition, end: newPosition };
+}
+
+function handleDuplicateLine( { codeLines, start, end, endIndex, endOffset } ) {
+  const line = codeLines[endIndex];
+  codeLines[endIndex] = start === end ? `${ line }\n${ line }` :
+    spliceText( line, endOffset, 0, codeLines.join( '\n' ).slice( start, end ) );
+}
+
+function handleEnter( { codeLines, start, startIndex, endIndex, startOffset, endOffset, indent } ) {
+  // ブロックが開いているか，閉じているかのチェック
+  const isOpenBrackets = line => /[\[{(]\s*$/.test( line );
+  const isCloseBrackets = line => /^[\]})]/.test( line );
+  
+  // 開始行の現在位置のインデント，終了行の文字列を取得
+  const startLine = codeLines[startIndex].slice( 0, startOffset );
+  const endLine = codeLines[endIndex].slice( endOffset ).trim(); // 終了行の空白を削除
+  let newIndent = startLine.match( /^\s*/ )[0];
+  
+  // 開始行がブロック開始で，終了行がブロック閉じでないなら，インデントを追加
+  newIndent += isOpenBrackets( startLine ) && !isCloseBrackets( endLine ) ? indent : '';
+  
+  // 開始行を更新して，新しい行を挿入
+  codeLines[startIndex] = `${ startLine }\n${ newIndent }${ endLine }`;
+  
+  // 間の行を削除
+  codeLines.splice( startIndex + 1, endIndex - startIndex );  
+  
+  // カーソル位置の計算と更新
+  const newPosition = start + newIndent.length + 1;
+  return { start: newPosition, end: newPosition };
+}
+
+function handleArrowUp( editor ) {
+  const { codeLines, startIndex, endIndex } = editor;
+  if ( startIndex < 1 ) return;
+  for ( let i = startIndex - 1; i < endIndex; i++ ) {
+    [ codeLines[i], codeLines[i + 1] ] = [ codeLines[i + 1], codeLines[i] ];
+  }
+  return {
+    start: editor.getCursorOffsetBy( startIndex - 1 ), 
+    end: editor.getCursorOffsetBy( endIndex ), 
+  };
+}
+
+function handleArrowDown( editor ) {
+  const { codeLines, startIndex, endIndex } = editor;
+  if ( endIndex + 1 >= codeLines.length ) return;
+  for ( let i = endIndex; i >= startIndex; i-- ) {
+    [ codeLines[i], codeLines[i + 1] ] = [ codeLines[i + 1], codeLines[i] ];
+  }
+  return {
+    start: editor.getCursorOffsetBy( startIndex + 1 ), 
+    end: editor.getCursorOffsetBy( endIndex + 2 ), 
+  };
+}
+
+// ユーティリティ関数
+
+// 指定の位置から指定した長さだけ読み飛ばし，テキストを挿入する関数
+function spliceText( str, start = 0, deleteCount = 0, insert = '' ) {
+  start = Math.max( 0, Math.min( start, str.length ) );
+  deleteCount = Math.max( 0, Math.min( deleteCount, str.length - start ) );
+  return str.slice( 0, start ) + insert + str.slice( start + deleteCount );
+}
+
+// 指定行にインデントを適応する関数
+function adjustLineIndent( line, indent, shiftKey ) {
+  const currentIndentLevel = Math.floor( line.match( /^\s*/ )[0].length / indent.length );
+  const newIndentLevel = Math.max( 0, currentIndentLevel + ( shiftKey ? -1 : 1 ) );
+  return indent.repeat( newIndentLevel ) + line.trim();
+};
+
+// 複数行インデント処理を行う関数
+function adjustMultipleLinesIndent( editor ) {
+  const { codeLines, startIndex, endIndex, indent, shiftKey } = editor;
+  for ( let i = startIndex; i <= endIndex; i++ ) {
+    codeLines[i] = adjustLineIndent( codeLines[i], indent, shiftKey );
+  }
+    
+  // 開始行の行頭と，終了行の行末までのオフセットを返す
+  return {
+    start: editor.getCursorOffsetBy( startIndex ), 
+    end: editor.getCursorOffsetBy( endIndex + 1 ), 
+  };
+}
+
+// 単一行のインデント処理を行い，現在位置からの差分を返す関数
+function adjustSingleLinesIndent( { codeLines, startIndex, startOffset, indent, shiftKey } ) {
+  const line = codeLines[startIndex];
+  const leadingspaceLength = line.match( /^\s*/ )[0].length;
+  
+  // 文字列の途中にカーソルがある場合，文字列内へインデント処理
+  if ( startOffset > leadingspaceLength ) {
+    // インデントを削除
+    if ( shiftKey ) {
+      // 開始位置から現在位置までに，最後にマッチしたインデントを削除
+      const indentPosition = line.slice( 0, startOffset ).lastIndexOf( indent );
+      
+      // カーソルを文字列の開始位置へ（見つからない場合）
+      if ( indentPosition < leadingspaceLength ) {
+        return leadingspaceLength - startOffset;
+      }
+        
+      // 元あったインデントの開始位置へ
+      codeLines[startIndex] = spliceText( line, indentPosition, indent.length );
+      return indentPosition - startOffset;    
+    }
+    // インデントを挿入
+    codeLines[startIndex] = spliceText( line, startOffset, 0, indent );
+    return indent.length;
+  }
+  
+  // インデントされた文字列の開始位置へ
+  codeLines[startIndex] = adjustLineIndent( line, indent, shiftKey );
+  return codeLines[startIndex].match( /^\s*/ )[0].length - startOffset;
+}
+</script>
