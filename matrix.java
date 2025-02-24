@@ -8,8 +8,7 @@ public class matrix {
       {-6},
       {5},
       {4}};
-     showMatrix(
-         luDecomp( a ));
+     showMatrix(lu( a, b ));
   }
   
   public static void showMatrix(double[][] a) {

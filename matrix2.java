@@ -2,20 +2,7 @@ public class foo {
   public static void main(String[] args) {
     double[][] x0 = {
           {0},{0}};
-  System.out.println(
-      simpson(
-        -1, 2, 1000));
-    double[][] a = {
-            {1, -2, -4},
-            {2, -4, 3},
-            {3, 4, -5}};
-    double[][] b = {
-            {-4},
-            {3},
-            {5}};
-            
-    // showMatrix(
-    //     gauss( a, b ));
+  System.out.println(simpson( -1, 2, 1000 ));
   }
   
   public static void bisection(double a, double b) {
